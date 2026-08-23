@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: 1️⃣ 拉取当前 LineageOS 内核源码
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 2️⃣ 部署底层编译依赖
         run: |
@@ -129,7 +129,7 @@ jobs:
           zip -r9 ../Dipper-HyperOS-Port-Kernel.zip *
 
       - name: 8️⃣ 提取最终内核刷机包
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: success()
         with:
           name: Dipper-MIUI-Port-SukiSU-Kernel
