@@ -68,6 +68,8 @@ jobs:
             git checkout FETCH_HEAD -- drivers/power/supply/qcom/battery.c
             git checkout FETCH_HEAD -- drivers/power/supply/qcom/smb1355-charger.c
             git checkout FETCH_HEAD -- drivers/power/supply/qcom/smb-lib.c
+            git checkout FETCH_HEAD -- drivers/power/supply/qcom/smb-lib.h
+            git checkout FETCH_HEAD -- drivers/power/supply/qcom/qpnp-smb2.c
           fi
 
       - name: 5️⃣ 动态双端注入 LineageOS 编译配置
