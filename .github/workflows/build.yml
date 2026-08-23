@@ -45,7 +45,7 @@ jobs:
           echo "📥 拉取 GCC 4.9 ARM32..."
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-arm32
 
-      - name: 4️⃣ 自动化代码整合: 拉取并注入小米官方驱动
+      - name: "4️⃣ 自动化代码整合: 拉取并注入小米官方驱动"
         run: |
           echo "🔄 连接 MiCode 官方仓库..."
           git remote add micode https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
