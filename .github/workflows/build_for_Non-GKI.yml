@@ -49,10 +49,15 @@ on:
         type: boolean
         default: true
       clang_version:
-        description: 'Clang 版本号 (sdm845 4.9 内核推荐 r416183b 即 Clang 12)'
+        description: 'Clang 版本号 (Google AOSP 官方版本，如 r416183b)'
         required: true
         type: string
         default: 'r416183b'
+      gcc_version:
+        description: 'GCC 版本号 (Google AOSP 官方版本，如 4.9)'
+        required: true
+        type: string
+        default: '4.9'
 
 jobs:
   build-kernel:
@@ -72,13 +77,13 @@ jobs:
             pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 libssl-dev cpio libelf-dev file unzip tar xz-utils zstd
 
-      - name: 拉取编译工具链 (智能探测 + 格式自适应解压 + 多源容灾回退)
+      - name: 拉取编译工具链 (Google AOSP 原生归档探测与拉取)
         run: |
           mkdir -p toolchains
           cd toolchains
           
           # ==========================================================
-          # 通用解压与格式自适应识别函数
+          # 通用自适应解压函数
           # ==========================================================
           extract_archive() {
             local file_path="$1"
@@ -87,7 +92,7 @@ jobs:
             
             local file_type
             file_type=$(file -b "$file_path" || true)
-            echo "-> 识别文件类型: $file_type"
+            echo "-> 识别文件格式: $file_type"
             
             case "$file_type" in
               *gzip*|*compress\'d*|*gzip\ compressed*)
@@ -108,31 +113,22 @@ jobs:
               *tar*|*POSIX\ tar*)
                 tar -xf "$file_path" -C "$target_dir"
                 ;;
-              *HTML*|*ASCII\ text*|*text*)
-                echo "警告: 下载的文件不是有效压缩包，内容为网页或文本:"
-                head -n 5 "$file_path"
-                return 1
-                ;;
               *)
-                echo "尝试通过通用 tar 解包..."
-                tar -xf "$file_path" -C "$target_dir" 2>/dev/null || {
-                  echo "通用 tar 失败，尝试 unzip..."
-                  unzip -q -o "$file_path" -d "$target_dir" 2>/dev/null || return 1
-                }
+                tar -xf "$file_path" -C "$target_dir" 2>/dev/null || \
+                unzip -q -o "$file_path" -d "$target_dir" 2>/dev/null || return 1
                 ;;
             esac
             return 0
           }
 
           # ==========================================================
-          # 1. 智能拉取 Clang (优先 AOSP 归档包，失败自动回退镜像源)
+          # 1. 智能探测拉取 Google AOSP 官方 Clang
           # ==========================================================
           CLANG_VER="${{ inputs.clang_version }}"
-          CLANG_SUCCESS=false
           mkdir -p clang
+          echo "正在探测 Google AOSP 官方 Clang (目标: clang-${CLANG_VER})..."
           
-          echo "正在探测 Google AOSP 官方分支 (目标: clang-${CLANG_VER})..."
-          branch_candidates=(
+          clang_branches=(
               "master-kernel-build-2021"
               "master-kernel-build-2022"
               "android12-release"
@@ -144,65 +140,115 @@ jobs:
               "master"
           )
           
-          for br in "${branch_candidates[@]}"; do
+          for br in "${clang_branches[@]}"; do
               test_url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${br}/clang-${CLANG_VER}.tar.gz"
-              echo -ne "  -> 探测分支 [${br}] ... "
+              echo -ne "  -> 探测 Clang 分支 [${br}] ... "
               
               http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$test_url" || true)
               if [ "$http_status" == "200" ]; then
                   echo "命中！正在下载..."
                   curl -L -s -A "Mozilla/5.0" -o clang_dl.tmp "$test_url" || true
-                  
                   if [ -s clang_dl.tmp ] && extract_archive "clang_dl.tmp" "clang"; then
                       rm -f clang_dl.tmp
-                      CLANG_SUCCESS=true
                       break
-                  else
-                      echo "该分支归档解析失败，继续探测下一分支..."
-                      rm -f clang_dl.tmp
                   fi
+                  rm -f clang_dl.tmp
               else
                   echo "跳过 (HTTP $http_status)"
               fi
           done
 
-          # 若官方归档下载全部失败，启动自动容灾方案 (从 LineageOS / GitHub 镜像拉取预构建库)
-          if [ "$CLANG_SUCCESS" != "true" ] || [ ! -f "clang/bin/clang" ]; then
-              echo "-> 官方 +archive 归档受限，启用备用 Git 浅克隆拉取 Clang..."
-              rm -rf clang && mkdir -p clang
-              
-              git clone -q --depth=1 "https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86_clang-${CLANG_VER}.git" clang || \
-              git clone -q --depth=1 -b master-kernel-build-2021 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86" tmp_clang && {
-                mv tmp_clang/clang-${CLANG_VER}/* clang/ 2>/dev/null || true
-                rm -rf tmp_clang
-              }
-          fi
-
-          # 自动修正解压可能带来的多层子目录结构
+          # 自动扁平化可能存在的嵌套目录
           if [ ! -f "clang/bin/clang" ]; then
               NESTED_BIN=$(find clang -type f -name "clang" | head -n 1)
               if [ -n "$NESTED_BIN" ]; then
                   NESTED_ROOT=$(dirname "$(dirname "$NESTED_BIN")")
-                  echo "-> 自动扁平化目录层级: $NESTED_ROOT -> clang"
                   cp -rn "$NESTED_ROOT"/* clang/ 2>/dev/null || true
               fi
           fi
 
-          # 最终确认 Clang 是否就绪
           if [ ! -f "clang/bin/clang" ]; then
-              echo "错误: Clang 部署失败，未能找到可执行文件 clang/bin/clang！"
+              echo "错误: Google 官方 Clang 拉取失败，未找到 clang/bin/clang！"
               exit 1
           fi
-          echo "Clang 工具链部署成功: $(./clang/bin/clang --version | head -n 1)"
+          echo "Clang 部署完成: $(./clang/bin/clang --version | head -n 1)"
 
           # ==========================================================
-          # 2. 拉取 Google 官方 GCC 4.9 (指定 master-kernel-build-2021 分支)
+          # 2. 智能探测拉取 Google AOSP 官方 GCC 64 & GCC 32
           # ==========================================================
-          echo "正在拉取 GCC 64 (master-kernel-build-2021 分支)..."
-          git clone -q --depth=1 -b master-kernel-build-2021 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
-          
-          echo "正在拉取 GCC 32 (master-kernel-build-2021 分支)..."
-          git clone -q --depth=1 -b master-kernel-build-2021 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
+          GCC_VER="${{ inputs.gcc_version }}"
+          mkdir -p gcc64 gcc32
+          echo "正在探测 Google AOSP 官方 GCC (版本: ${GCC_VER})..."
+
+          gcc_branches=(
+              "android-10.0.0_r47"
+              "android-9.0.0_r61"
+              "android10-release"
+              "pie-release"
+              "master-kernel-build-2020"
+              "master-kernel-build-2021"
+              "android-8.1.0_r81"
+              "main"
+          )
+
+          # 下载 GCC 64
+          for br in "${gcc_branches[@]}"; do
+              gcc64_url="https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VER}/+archive/refs/heads/${br}.tar.gz"
+              echo -ne "  -> 探测 GCC 64 分支 [${br}] ... "
+              
+              http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$gcc64_url" || true)
+              if [ "$http_status" == "200" ]; then
+                  echo "命中！正在下载..."
+                  curl -L -s -A "Mozilla/5.0" -o gcc64_dl.tmp "$gcc64_url" || true
+                  if [ -s gcc64_dl.tmp ] && extract_archive "gcc64_dl.tmp" "gcc64"; then
+                      rm -f gcc64_dl.tmp
+                      break
+                  fi
+                  rm -f gcc64_dl.tmp
+              else
+                  echo "跳过 (HTTP $http_status)"
+              fi
+          done
+
+          # 下载 GCC 32
+          for br in "${gcc_branches[@]}"; do
+              gcc32_url="https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-${GCC_VER}/+archive/refs/heads/${br}.tar.gz"
+              echo -ne "  -> 探测 GCC 32 分支 [${br}] ... "
+              
+              http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$gcc32_url" || true)
+              if [ "$http_status" == "200" ]; then
+                  echo "命中！正在下载..."
+                  curl -L -s -A "Mozilla/5.0" -o gcc32_dl.tmp "$gcc32_url" || true
+                  if [ -s gcc32_dl.tmp ] && extract_archive "gcc32_dl.tmp" "gcc32"; then
+                      rm -f gcc32_dl.tmp
+                      break
+                  fi
+                  rm -f gcc32_dl.tmp
+              else
+                  echo "跳过 (HTTP $http_status)"
+              fi
+          done
+
+          # 自动修正 GCC 目录层级
+          if [ ! -f "gcc64/bin/aarch64-linux-android-gcc" ]; then
+              NESTED_GCC64=$(find gcc64 -type f -name "aarch64-linux-android-gcc" | head -n 1)
+              if [ -n "$NESTED_GCC64" ]; then
+                  cp -rn "$(dirname "$(dirname "$NESTED_GCC64")")"/* gcc64/ 2>/dev/null || true
+              fi
+          fi
+          if [ ! -f "gcc32/bin/arm-linux-androideabi-gcc" ]; then
+              NESTED_GCC32=$(find gcc32 -type f -name "arm-linux-androideabi-gcc" | head -n 1)
+              if [ -n "$NESTED_GCC32" ]; then
+                  cp -rn "$(dirname "$(dirname "$NESTED_GCC32")")"/* gcc32/ 2>/dev/null || true
+              fi
+          fi
+
+          # 验证 GCC 工具链完整性
+          if [ ! -f "gcc64/bin/aarch64-linux-android-gcc" ] || [ ! -f "gcc32/bin/arm-linux-androideabi-gcc" ]; then
+              echo "错误: Google 官方 GCC 工具链拉取失败，请检查 GCC 版本号是否正确！"
+              exit 1
+          fi
+          echo "Google AOSP GCC 64 & GCC 32 部署成功！"
 
       - name: 开始编译内核
         run: |
@@ -214,12 +260,11 @@ jobs:
           export GCC64_PATH="${GITHUB_WORKSPACE}/toolchains/gcc64"
           export GCC32_PATH="${GITHUB_WORKSPACE}/toolchains/gcc32"
           
-          # 严格校验所有必要工具链组件是否存在
+          # 校验所有必要工具链
           for f in "$CLANG_PATH/bin/clang" "$GCC64_PATH/bin/aarch64-linux-android-gcc" "$GCC32_PATH/bin/arm-linux-androideabi-gcc"; do
             [ -e "$f" ] || { echo "工具链缺失: $f"; exit 1; }
           done
           
-          # 完全还原原 build.sh 环境变量
           export ARCH="arm64"
           export SUBARCH="arm64"
           export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
