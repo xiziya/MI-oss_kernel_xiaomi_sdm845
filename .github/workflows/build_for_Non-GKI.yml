@@ -83,7 +83,7 @@ jobs:
           CLANG_VER="${{ inputs.clang_version }}"
           echo "启动 Google AOSP 分支智能探测器 (目标: clang-${CLANG_VER})..."
           
-          # 预设的 AOSP 分支探测列表
+          # 预设的 AOSP 分支探测列表 (匹配你脚本中的逻辑)
           branch_candidates=(
               "master-kernel-build-2022"
               "master-kernel-build-2023"
@@ -116,9 +116,9 @@ jobs:
               exit 1
           fi
           
-          echo "-> 下载纯净官方归档包..."
+          echo "-> 下载纯净官方归档包 (静默下载中，请耐心等待1-3分钟)..."
           mkdir -p clang
-          curl -L --progress-bar -o clang.tar.gz "$found_download_url"
+          curl -L -s -o clang.tar.gz "$found_download_url"
           
           if file clang.tar.gz | grep -q "gzip compressed"; then
               echo "解压归档包..."
@@ -133,11 +133,11 @@ jobs:
           # =======================================
           # 2. 拉取 Google 官方 GCC (旧版内核 4.9 必需)
           # =======================================
-          echo "正在拉取 Google 官方 GCC 64..."
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
+          echo "正在拉取 Google 官方 GCC 64 (静默拉取中，约需1-2分钟)..."
+          git clone -q --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           
-          echo "正在拉取 Google 官方 GCC 32..."
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
+          echo "正在拉取 Google 官方 GCC 32 (静默拉取中，约需1-2分钟)..."
+          git clone -q --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
 
       - name: 开始编译内核
         run: |
