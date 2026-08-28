@@ -49,10 +49,10 @@ on:
         type: boolean
         default: true
       clang_version:
-        description: 'Clang 版本号 (用于 Google 官方智能探测拉取，如 r530567)'
+        description: 'Clang 版本号 (sdm845 4.9 内核推荐 r416183b 即 Clang 12)'
         required: true
         type: string
-        default: 'r530567'
+        default: 'r416183b'
 
 jobs:
   build-kernel:
@@ -70,7 +70,7 @@ jobs:
           sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf \
             liblz4-tool libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop \
             pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python3 libssl-dev cpio gcc-multilib g++-multilib binutils-aarch64-linux-gnu
+            python3 libssl-dev cpio libelf-dev
 
       - name: 拉取编译工具链 (Google AOSP 官方原生)
         run: |
@@ -83,15 +83,14 @@ jobs:
           CLANG_VER="${{ inputs.clang_version }}"
           echo "启动 Google AOSP 分支智能探测器 (目标: clang-${CLANG_VER})..."
           
-          # 预设的 AOSP 分支探测列表
           branch_candidates=(
               "master-kernel-build-2022"
-              "master-kernel-build-2023"
-              "master-kernel-build-2024"
               "master-kernel-build-2021"
+              "android12-release"
               "android13-release"
               "android14-release"
-              "android12-release"
+              "master-kernel-build-2023"
+              "master-kernel-build-2024"
               "main"
               "master"
           )
@@ -116,28 +115,20 @@ jobs:
               exit 1
           fi
           
-          echo "-> 下载纯净官方归档包 (静默下载中，请耐心等待1-3分钟)..."
+          echo "-> 正在下载 Clang (${CLANG_VER})..."
           mkdir -p clang
           curl -L -s -o clang.tar.gz "$found_download_url"
-          
-          if file clang.tar.gz | grep -q "gzip compressed"; then
-              echo "解压归档包..."
-              tar -xzf clang.tar.gz -C clang
-              rm -f clang.tar.gz
-          else
-              echo "错误: 归档损坏或被拦截。"
-              rm -f clang.tar.gz
-              exit 1
-          fi
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
           
           # =======================================
-          # 2. 拉取 Google 官方 GCC (旧版内核 4.9 必需)
+          # 2. 拉取 Google 官方 GCC 4.9 (指定 master-kernel-build-2021 分支)
           # =======================================
-          echo "正在拉取 Google 官方 GCC 64 (静默拉取中，约需1-2分钟)..."
-          git clone -q --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
+          echo "正在拉取 GCC 64 (master-kernel-build-2021 分支)..."
+          git clone -q --depth=1 -b master-kernel-build-2021 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           
-          echo "正在拉取 Google 官方 GCC 32 (静默拉取中，约需1-2分钟)..."
-          git clone -q --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
+          echo "正在拉取 GCC 32 (master-kernel-build-2021 分支)..."
+          git clone -q --depth=1 -b master-kernel-build-2021 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
 
       - name: 开始编译内核
         run: |
@@ -149,19 +140,19 @@ jobs:
           export GCC64_PATH="${GITHUB_WORKSPACE}/toolchains/gcc64"
           export GCC32_PATH="${GITHUB_WORKSPACE}/toolchains/gcc32"
           
-          # ==========================================================
-          # 环境变量必须正确写入
-          # ==========================================================
-          export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-          export LD_LIBRARY_PATH="$CLANG_PATH/lib64:$CLANG_PATH/lib:$LD_LIBRARY_PATH"
+          # 校验工具链是否完整就绪
+          for f in "$CLANG_PATH/bin/clang" "$GCC64_PATH/bin/aarch64-linux-android-gcc" "$GCC32_PATH/bin/arm-linux-androideabi-gcc"; do
+            [ -e "$f" ] || { echo "工具链缺失: $f"; exit 1; }
+          done
           
+          # 完全还原原 build.sh 环境变量
           export ARCH="arm64"
           export SUBARCH="arm64"
-          
-          export CROSS_COMPILE="${GCC64_PATH}/bin/aarch64-linux-android-"
-          export CROSS_COMPILE_ARM32="${GCC32_PATH}/bin/arm-linux-androideabi-"
+          export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
+          export LD_LIBRARY_PATH="$CLANG_PATH/lib64:$CLANG_PATH/lib:$LD_LIBRARY_PATH"
+          export CROSS_COMPILE="aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="arm-linux-androideabi-"
           export CLANG_TRIPLE="aarch64-linux-gnu-"
-          export CC_CUSTOM="${CLANG_PATH}/bin/clang"
           
           NAME="${{ inputs.kernel_name }}"
           VER="${{ inputs.kernel_version }}"
@@ -179,9 +170,11 @@ jobs:
           DATE=$(date +%Y%m%d)
           LOCAL="-${NAME}-${VER}-${DATE}"
           
+          echo "清理源码..."
           make mrproper
           rm -rf "$OUT_DIR"
           
+          echo "生成配置..."
           if [ -n "$DEVICE_CONFIG" ] && [ "$DEVICE_CONFIG" != "none" ]; then
             make O="$OUT_DIR" "$DEFCONFIG" "$DEVICE_CONFIG"
           else
@@ -192,6 +185,7 @@ jobs:
           echo "CONFIG_LOCALVERSION=\"$LOCAL\"" >> "$OUT_DIR/.config"
           
           if [ "$DISABLE_LTO" == "true" ]; then
+            echo "-> 正在禁用 LTO 优化..."
             sed -i 's/CONFIG_LTO=y/# CONFIG_LTO is not set/' "$OUT_DIR/.config"
             sed -i 's/CONFIG_LTO_CLANG=y/# CONFIG_LTO_CLANG is not set/' "$OUT_DIR/.config"
             sed -i 's/CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' "$OUT_DIR/.config"
@@ -200,23 +194,19 @@ jobs:
             echo "CONFIG_LTO_NONE=y" >> "$OUT_DIR/.config"
           fi
           
-          # ==========================================================
-          # 屏蔽 stack-protector
-          # ==========================================================
-          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/g' "$OUT_DIR/.config"
-          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> "$OUT_DIR/.config"
-          
           make O="$OUT_DIR" olddefconfig >/dev/null 2>&1
           
           CURRENT_RELEASE=$(make O="$OUT_DIR" -s kernelrelease 2>/dev/null || true)
           RELEASE_LEN=${#CURRENT_RELEASE}
           
           if [ "$RELEASE_LEN" -gt 64 ] && [ "$FIX_UTS" == "true" ]; then
+            echo "-> 尝试禁用 CONFIG_LOCALVERSION_AUTO..."
             sed -i 's/CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/g' "$OUT_DIR/.config"
             CURRENT_RELEASE=$(make O="$OUT_DIR" -s kernelrelease 2>/dev/null || true)
             RELEASE_LEN=${#CURRENT_RELEASE}
             
             if [ "$RELEASE_LEN" -gt 64 ]; then
+              echo "-> 正在截断名称..."
               EXCESS=$(( RELEASE_LEN - 64 ))
               NEW_LOCAL_LEN=$(( ${#LOCAL} - EXCESS ))
               NEW_LOCAL=${LOCAL:0:$NEW_LOCAL_LEN}
@@ -224,28 +214,18 @@ jobs:
               sed -i '/^CONFIG_LOCALVERSION=/d' "$OUT_DIR/.config"
               echo "CONFIG_LOCALVERSION=\"$NEW_LOCAL\"" >> "$OUT_DIR/.config"
               make O="$OUT_DIR" olddefconfig >/dev/null 2>&1
+              CURRENT_RELEASE=$(make O="$OUT_DIR" -s kernelrelease 2>/dev/null || true)
             fi
+            echo "-> 修复成功！新的内核版本号为: $CURRENT_RELEASE (长度: ${#CURRENT_RELEASE})"
           fi
           
           echo "开始编译..."
-          # ==========================================================
-          # 【修复点：去除全局强制 LLVM 链接器，恢复部分 GCC 的原生行为】
-          # ==========================================================
-          # 对于极为古老的 4.9 内核 (例如 Xiaomi sdm845)，强制全局使用
-          # ld.lld、llvm-ar 等新世代工具会导致底层的汇编文件（如 asm-offsets.s 或 empty.o）
-          # 被当做无效架构甚至抛出 /usr/bin/as: unrecognized option '-EL'。
-          # 这里退回更稳妥的交叉编译参数，仅指定 CC 为 clang 和 CLANG_TRIPLE。
-          
-          make -j"$(nproc --all)" O="$OUT_DIR" \
-               CC="${CC_CUSTOM}" \
-               CLANG_TRIPLE="${CLANG_TRIPLE}" \
-               CROSS_COMPILE="${CROSS_COMPILE}" \
-               CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
-               Image.gz-dtb 2>&1 | tee build.log
+          make -j"$(nproc --all)" O="$OUT_DIR" CC=clang Image.gz-dtb 2>&1 | tee build.log
           
           mkdir -p ${WORKSPACE_DIR}/artifacts
           if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
             cp "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ${WORKSPACE_DIR}/artifacts/
+            echo "编译成功！"
           else
             echo "编译失败，未找到 Image.gz-dtb"
             exit 1
@@ -268,18 +248,13 @@ jobs:
           cd AK3
           
           echo "根据 Action 交互参数配置 anykernel.sh..."
-          # 配置 TWRP 展示的欢迎横幅
           sed -i "s|kernel.string=.*|kernel.string=${{ inputs.ak3_banner_text }}|g" anykernel.sh
-          
-          # 配置设备 Codename
           sed -i "s|device.name1=.*|device.name1=${{ inputs.codename }}|g" anykernel.sh
-          # 禁用对其他无关设备的检查
           sed -i "s|device.name2=.*|device.name2=|g" anykernel.sh
           sed -i "s|device.name3=.*|device.name3=|g" anykernel.sh
           sed -i "s|device.name4=.*|device.name4=|g" anykernel.sh
           sed -i "s|device.name5=.*|device.name5=|g" anykernel.sh
           
-          # 配置 A/B 分区逻辑
           if [ "${{ inputs.is_ab_device }}" == "true" ]; then
             sed -i "s|is_slot_device=.*|is_slot_device=1;|g" anykernel.sh
           else
@@ -288,15 +263,12 @@ jobs:
           
           echo "复制编译产物到 AK3 目录..."
           cp "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" .
-          
-          # 清理无用文件减小体积
           rm -rf .git README.md *placeholder
           
           echo "开始生成 ZIP 刷机包..."
           ZIP_NAME="AnyKernel3-${{ inputs.kernel_name }}-${{ inputs.codename }}-$(date +%Y%m%d).zip"
           zip -r9 "$ZIP_NAME" *
           
-          echo "拷贝刷机包到输出目录..."
           cp "$ZIP_NAME" ${WORKSPACE_DIR}/artifacts/
 
       - name: 上传内核及 AK3 刷机包产物
