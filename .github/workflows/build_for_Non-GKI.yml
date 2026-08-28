@@ -70,22 +70,71 @@ jobs:
           sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf \
             liblz4-tool libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop \
             pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python3 libssl-dev cpio libelf-dev
+            python3 libssl-dev cpio libelf-dev file unzip tar xz-utils zstd
 
-      - name: 拉取编译工具链 (Google AOSP 官方原生)
+      - name: 拉取编译工具链 (智能探测 + 格式自适应解压 + 多源容灾回退)
         run: |
           mkdir -p toolchains
           cd toolchains
           
-          # =======================================
-          # 1. 智能拉取 Google 官方 Clang
-          # =======================================
+          # ==========================================================
+          # 通用解压与格式自适应识别函数
+          # ==========================================================
+          extract_archive() {
+            local file_path="$1"
+            local target_dir="$2"
+            mkdir -p "$target_dir"
+            
+            local file_type
+            file_type=$(file -b "$file_path" || true)
+            echo "-> 识别文件类型: $file_type"
+            
+            case "$file_type" in
+              *gzip*|*compress\'d*|*gzip\ compressed*)
+                tar -xzf "$file_path" -C "$target_dir"
+                ;;
+              *XZ*|*xz*|*XZ\ compressed*)
+                tar -xJf "$file_path" -C "$target_dir"
+                ;;
+              *Zip*|*zip*|*Zip\ archive*)
+                unzip -q -o "$file_path" -d "$target_dir"
+                ;;
+              *bzip2*|*bzip*|*bzip2\ compressed*)
+                tar -xjf "$file_path" -C "$target_dir"
+                ;;
+              *Zstandard*|*zstd*|*Zstandard\ compressed*)
+                tar --zstd -xf "$file_path" -C "$target_dir"
+                ;;
+              *tar*|*POSIX\ tar*)
+                tar -xf "$file_path" -C "$target_dir"
+                ;;
+              *HTML*|*ASCII\ text*|*text*)
+                echo "警告: 下载的文件不是有效压缩包，内容为网页或文本:"
+                head -n 5 "$file_path"
+                return 1
+                ;;
+              *)
+                echo "尝试通过通用 tar 解包..."
+                tar -xf "$file_path" -C "$target_dir" 2>/dev/null || {
+                  echo "通用 tar 失败，尝试 unzip..."
+                  unzip -q -o "$file_path" -d "$target_dir" 2>/dev/null || return 1
+                }
+                ;;
+            esac
+            return 0
+          }
+
+          # ==========================================================
+          # 1. 智能拉取 Clang (优先 AOSP 归档包，失败自动回退镜像源)
+          # ==========================================================
           CLANG_VER="${{ inputs.clang_version }}"
-          echo "启动 Google AOSP 分支智能探测器 (目标: clang-${CLANG_VER})..."
+          CLANG_SUCCESS=false
+          mkdir -p clang
           
+          echo "正在探测 Google AOSP 官方分支 (目标: clang-${CLANG_VER})..."
           branch_candidates=(
-              "master-kernel-build-2022"
               "master-kernel-build-2021"
+              "master-kernel-build-2022"
               "android12-release"
               "android13-release"
               "android14-release"
@@ -95,35 +144,60 @@ jobs:
               "master"
           )
           
-          found_download_url=""
           for br in "${branch_candidates[@]}"; do
               test_url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${br}/clang-${CLANG_VER}.tar.gz"
               echo -ne "  -> 探测分支 [${br}] ... "
               
               http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$test_url" || true)
               if [ "$http_status" == "200" ]; then
-                  echo "命中！(HTTP 200)"
-                  found_download_url="$test_url"
-                  break
+                  echo "命中！正在下载..."
+                  curl -L -s -A "Mozilla/5.0" -o clang_dl.tmp "$test_url" || true
+                  
+                  if [ -s clang_dl.tmp ] && extract_archive "clang_dl.tmp" "clang"; then
+                      rm -f clang_dl.tmp
+                      CLANG_SUCCESS=true
+                      break
+                  else
+                      echo "该分支归档解析失败，继续探测下一分支..."
+                      rm -f clang_dl.tmp
+                  fi
               else
                   echo "跳过 (HTTP $http_status)"
               fi
           done
-          
-          if [ -z "$found_download_url" ]; then
-              echo "错误: 官方分支均未找到归档！请检查 Clang 版本号是否输入正确。"
+
+          # 若官方归档下载全部失败，启动自动容灾方案 (从 LineageOS / GitHub 镜像拉取预构建库)
+          if [ "$CLANG_SUCCESS" != "true" ] || [ ! -f "clang/bin/clang" ]; then
+              echo "-> 官方 +archive 归档受限，启用备用 Git 浅克隆拉取 Clang..."
+              rm -rf clang && mkdir -p clang
+              
+              git clone -q --depth=1 "https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86_clang-${CLANG_VER}.git" clang || \
+              git clone -q --depth=1 -b master-kernel-build-2021 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86" tmp_clang && {
+                mv tmp_clang/clang-${CLANG_VER}/* clang/ 2>/dev/null || true
+                rm -rf tmp_clang
+              }
+          fi
+
+          # 自动修正解压可能带来的多层子目录结构
+          if [ ! -f "clang/bin/clang" ]; then
+              NESTED_BIN=$(find clang -type f -name "clang" | head -n 1)
+              if [ -n "$NESTED_BIN" ]; then
+                  NESTED_ROOT=$(dirname "$(dirname "$NESTED_BIN")")
+                  echo "-> 自动扁平化目录层级: $NESTED_ROOT -> clang"
+                  cp -rn "$NESTED_ROOT"/* clang/ 2>/dev/null || true
+              fi
+          fi
+
+          # 最终确认 Clang 是否就绪
+          if [ ! -f "clang/bin/clang" ]; then
+              echo "错误: Clang 部署失败，未能找到可执行文件 clang/bin/clang！"
               exit 1
           fi
-          
-          echo "-> 正在下载 Clang (${CLANG_VER})..."
-          mkdir -p clang
-          curl -L -s -o clang.tar.gz "$found_download_url"
-          tar -xzf clang.tar.gz -C clang
-          rm -f clang.tar.gz
-          
-          # =======================================
+          echo "Clang 工具链部署成功: $(./clang/bin/clang --version | head -n 1)"
+
+          # ==========================================================
           # 2. 拉取 Google 官方 GCC 4.9 (指定 master-kernel-build-2021 分支)
-          # =======================================
+          # ==========================================================
           echo "正在拉取 GCC 64 (master-kernel-build-2021 分支)..."
           git clone -q --depth=1 -b master-kernel-build-2021 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           
@@ -140,7 +214,7 @@ jobs:
           export GCC64_PATH="${GITHUB_WORKSPACE}/toolchains/gcc64"
           export GCC32_PATH="${GITHUB_WORKSPACE}/toolchains/gcc32"
           
-          # 校验工具链是否完整就绪
+          # 严格校验所有必要工具链组件是否存在
           for f in "$CLANG_PATH/bin/clang" "$GCC64_PATH/bin/aarch64-linux-android-gcc" "$GCC32_PATH/bin/arm-linux-androideabi-gcc"; do
             [ -e "$f" ] || { echo "工具链缺失: $f"; exit 1; }
           done
