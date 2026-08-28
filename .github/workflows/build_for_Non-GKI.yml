@@ -48,21 +48,11 @@ on:
         required: true
         type: boolean
         default: true
-      clang_url:
-        description: 'Clang 工具链 (微软云 Azure 仓库地址)'
+      clang_version:
+        description: 'Clang 版本号 (用于 Google 官方智能探测拉取，如 r416183b 代表 Clang 12)'
         required: true
         type: string
-        default: 'https://dev.azure.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-12030143/_git/android_prebuilts_clang_host_linux-x86_clang-12030143'
-      gcc64_url:
-        description: 'GCC-64 工具链 (微软云 Azure 仓库地址)'
-        required: true
-        type: string
-        default: 'https://dev.azure.com/crdroidandroid/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/_git/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9'
-      gcc32_url:
-        description: 'GCC-32 工具链 (微软云 Azure 仓库地址)'
-        required: true
-        type: string
-        default: 'https://dev.azure.com/crdroidandroid/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9/_git/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9'
+        default: 'r416183b'
 
 jobs:
   build-kernel:
@@ -82,16 +72,72 @@ jobs:
             pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 libssl-dev cpio
 
-      - name: 拉取编译工具链 (从 Azure 微软云)
+      - name: 拉取编译工具链 (Google AOSP 官方原生)
         run: |
           mkdir -p toolchains
           cd toolchains
-          echo "正在拉取 Clang..."
-          git clone --depth=1 ${{ inputs.clang_url }} clang
-          echo "正在拉取 GCC 64..."
-          git clone --depth=1 ${{ inputs.gcc64_url }} gcc64
-          echo "正在拉取 GCC 32..."
-          git clone --depth=1 ${{ inputs.gcc32_url }} gcc32
+          
+          # =======================================
+          # 1. 智能拉取 Google 官方 Clang
+          # =======================================
+          CLANG_VER="${{ inputs.clang_version }}"
+          echo "启动 Google AOSP 分支智能探测器 (目标: clang-${CLANG_VER})..."
+          
+          # 预设的 AOSP 分支探测列表
+          branch_candidates=(
+              "master-kernel-build-2022"
+              "master-kernel-build-2023"
+              "master-kernel-build-2024"
+              "master-kernel-build-2021"
+              "android13-release"
+              "android14-release"
+              "android12-release"
+              "main"
+              "master"
+          )
+          
+          found_download_url=""
+          for br in "${branch_candidates[@]}"; do
+              test_url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${br}/clang-${CLANG_VER}.tar.gz"
+              echo -ne "  -> 探测分支 [${br}] ... "
+              
+              http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$test_url" || true)
+              if [ "$http_status" == "200" ]; then
+                  echo "命中！(HTTP 200)"
+                  found_download_url="$test_url"
+                  break
+              else
+                  echo "跳过 (HTTP $http_status)"
+              fi
+          done
+          
+          if [ -z "$found_download_url" ]; then
+              echo "错误: 官方分支均未找到归档！请检查 Clang 版本号是否输入正确。"
+              exit 1
+          fi
+          
+          echo "-> 下载纯净官方归档包..."
+          mkdir -p clang
+          curl -L --progress-bar -o clang.tar.gz "$found_download_url"
+          
+          if file clang.tar.gz | grep -q "gzip compressed"; then
+              echo "解压归档包..."
+              tar -xzf clang.tar.gz -C clang
+              rm -f clang.tar.gz
+          else
+              echo "错误: 归档损坏或被拦截。"
+              rm -f clang.tar.gz
+              exit 1
+          fi
+          
+          # =======================================
+          # 2. 拉取 Google 官方 GCC (旧版内核 4.9 必需)
+          # =======================================
+          echo "正在拉取 Google 官方 GCC 64..."
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
+          
+          echo "正在拉取 Google 官方 GCC 32..."
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
 
       - name: 开始编译内核
         run: |
@@ -203,7 +249,7 @@ jobs:
           
           # 配置设备 Codename
           sed -i "s|device.name1=.*|device.name1=${{ inputs.codename }}|g" anykernel.sh
-          # 禁用对其他无关设备的检查 (将原有的 device.name2 等清空，避免刷机失败)
+          # 禁用对其他无关设备的检查
           sed -i "s|device.name2=.*|device.name2=|g" anykernel.sh
           sed -i "s|device.name3=.*|device.name3=|g" anykernel.sh
           sed -i "s|device.name4=.*|device.name4=|g" anykernel.sh
