@@ -49,7 +49,7 @@ on:
         type: boolean
         default: true
       clang_version:
-        description: 'Clang 版本号 (Google AOSP 官方版本，如 r416183b)'
+        description: 'Clang 版本号 (sdm845 4.9 内核推荐 r416183b 即 Clang 12)'
         required: true
         type: string
         default: 'r416183b'
@@ -158,7 +158,7 @@ jobs:
               fi
           done
 
-          # 自动扁平化可能存在的嵌套目录
+          # 自动扁平化目录层级
           if [ ! -f "clang/bin/clang" ]; then
               NESTED_BIN=$(find clang -type f -name "clang" | head -n 1)
               if [ -n "$NESTED_BIN" ]; then
@@ -289,8 +289,7 @@ jobs:
           DATE=$(date +%Y%m%d)
           LOCAL="-${NAME}-${VER}-${DATE}"
           
-          echo "清理源码..."
-          make mrproper
+          # 移除引起 MTK 驱动报错的 make mrproper
           rm -rf "$OUT_DIR"
           
           echo "生成配置..."
